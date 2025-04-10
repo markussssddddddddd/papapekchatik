@@ -1,4 +1,4 @@
-from main import engine, Base, Product, Session
+from main import engine, Base, Product, Session, Admin
 
 def init_db():
     Base.metadata.create_all(engine)
@@ -11,23 +11,51 @@ def init_db():
             Product(
                 name="Яблочный пирог",
                 description="Нежный пирог с яблоками и корицей",
-                price=450.0,
+                price=15.90,
                 category="sweet",
-                image_url="https://example.com/apple_pie.jpg"
+                image_url="https://i.imgur.com/example1.jpg"
             ),
             Product(
                 name="Шоколадный пирог",
                 description="Шоколадный пирог с вишней",
-                price=550.0,
+                price=18.50,
                 category="sweet",
-                image_url="https://example.com/chocolate_pie.jpg"
+                image_url="https://i.imgur.com/example2.jpg"
             ),
             Product(
                 name="Черничный пирог",
                 description="Пирог с черникой и ванильным кремом",
-                price=500.0,
+                price=17.20,
                 category="sweet",
-                image_url="https://example.com/blueberry_pie.jpg"
+                image_url="https://i.imgur.com/example3.jpg"
+            ),
+            Product(
+                name="Клубничный пирог",
+                description="Пирог со свежей клубникой и заварным кремом",
+                price=19.90,
+                category="sweet",
+                image_url="https://i.imgur.com/example4.jpg"
+            ),
+            Product(
+                name="Лимонный пирог",
+                description="Пирог с лимонной начинкой и безе",
+                price=16.80,
+                category="sweet",
+                image_url="https://i.imgur.com/example5.jpg"
+            ),
+            Product(
+                name="Карамельный пирог",
+                description="Пирог с карамельной начинкой и орехами",
+                price=20.50,
+                category="sweet",
+                image_url="https://i.imgur.com/example6.jpg"
+            ),
+            Product(
+                name="Творожный пирог",
+                description="Пирог с творожной начинкой и изюмом",
+                price=17.90,
+                category="sweet",
+                image_url="https://i.imgur.com/example7.jpg"
             )
         ]
 
@@ -36,24 +64,52 @@ def init_db():
             Product(
                 name="Мясной пирог",
                 description="Пирог с говядиной и грибами",
-                price=600.0,
+                price=22.90,
                 category="savory",
-                image_url="https://example.com/meat_pie.jpg"
+                image_url="https://i.imgur.com/example8.jpg"
             ),
             Product(
                 name="Куриный пирог",
                 description="Пирог с курицей и овощами",
-                price=550.0,
+                price=21.50,
                 category="savory",
-                image_url="https://example.com/chicken_pie.jpg"
+                image_url="https://i.imgur.com/example9.jpg"
             ),
             Product(
                 name="Сырный пирог",
                 description="Пирог с тремя видами сыра",
-                price=500.0,
+                price=19.90,
                 category="savory",
-                image_url="https://example.com/cheese_pie.jpg",
-                is_special=1  # Специальное предложение
+                image_url="https://i.imgur.com/example10.jpg",
+                is_special=1
+            ),
+            Product(
+                name="Лососевый пирог",
+                description="Пирог с лососем и шпинатом",
+                price=25.90,
+                category="savory",
+                image_url="https://i.imgur.com/example11.jpg"
+            ),
+            Product(
+                name="Овощной пирог",
+                description="Пирог с сезонными овощами и зеленью",
+                price=18.50,
+                category="savory",
+                image_url="https://i.imgur.com/example12.jpg"
+            ),
+            Product(
+                name="Грибной пирог",
+                description="Пирог с лесными грибами и луком",
+                price=20.90,
+                category="savory",
+                image_url="https://i.imgur.com/example13.jpg"
+            ),
+            Product(
+                name="Картофельный пирог",
+                description="Пирог с картофелем и зеленым луком",
+                price=16.90,
+                category="savory",
+                image_url="https://i.imgur.com/example14.jpg"
             )
         ]
 
@@ -63,5 +119,28 @@ def init_db():
 
     session.close()
 
+def add_admin(user_id: int, username: str):
+    """Добавляет нового администратора в базу данных"""
+    session = Session()
+    
+    # Проверяем, существует ли уже администратор с таким user_id
+    existing_admin = session.query(Admin).filter_by(user_id=user_id).first()
+    
+    if not existing_admin:
+        new_admin = Admin(
+            user_id=user_id,
+            username=username,
+            is_active=True
+        )
+        session.add(new_admin)
+        session.commit()
+        print(f"Администратор {username} (ID: {user_id}) успешно добавлен")
+    else:
+        print(f"Администратор с ID {user_id} уже существует")
+    
+    session.close()
+
 if __name__ == "__main__":
-    init_db() 
+    init_db()
+    # Здесь вы можете добавить администраторов, когда получите их ID
+    # Пример: add_admin(123456789, "admin_username") 

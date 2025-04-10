@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
@@ -46,22 +46,40 @@ class Order(Base):
     created_at = Column(DateTime, default=datetime.now)
     status = Column(String, default='pending')
 
+class Admin(Base):
+    __tablename__ = 'admins'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, unique=True)
+    username = Column(String)
+    is_active = Column(Boolean, default=True)
+
 # Создание таблиц
 Base.metadata.create_all(engine)
 
 # Клавиатуры
-def get_main_keyboard():
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🍰 Меню")],
-            [KeyboardButton(text="🎁 Акции")],
-            [KeyboardButton(text="🛒 Корзина")],
-            [KeyboardButton(text="🚚 Условия доставки")],
-            [KeyboardButton(text="ℹ️ О нас")]
-        ],
-        resize_keyboard=True
-    )
-    return keyboard
+def get_main_keyboard(user_id=None):
+    session = Session()
+    is_admin = False
+    if user_id:
+        admin = session.query(Admin).filter_by(user_id=user_id, is_active=True).first()
+        is_admin = bool(admin)
+    session.close()
+
+    keyboard = [
+        [KeyboardButton(text="🍰 Меню")],
+        [KeyboardButton(text="🎁 Акции")],
+        [KeyboardButton(text="🛒 Корзина")],
+        [KeyboardButton(text="🚚 Условия доставки")],
+        [KeyboardButton(text="ℹ️ О нас")]
+    ]
+
+    if is_admin:
+        keyboard.extend([
+            [KeyboardButton(text="📋 Заказы")],
+            [KeyboardButton(text="🧺 Корзины")]
+        ])
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def get_category_keyboard():
     keyboard = InlineKeyboardBuilder()
@@ -97,7 +115,7 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "Добро пожаловать в нашу пекарню! 🥖\n"
         "Выберите интересующий вас раздел:",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_keyboard(message.from_user.id)
     )
 
 @dp.message(lambda message: message.text == "🍰 Меню")
@@ -178,12 +196,18 @@ async def process_product(callback: types.CallbackQuery):
     keyboard.add(InlineKeyboardButton(text="➕ Добавить в корзину", callback_data=f"add_{product_id}"))
     keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"))
     
-    await callback.message.edit_text(
-        f"{product.name}\n\n"
-        f"{product.description}\n\n"
-        f"Цена: {product.price} руб.",
+    # Отправляем фотографию продукта
+    await callback.message.answer_photo(
+        photo=product.image_url,
+        caption=f"{product.name}\n\n"
+                f"{product.description}\n\n"
+                f"Цена: {product.price} BYN",
         reply_markup=keyboard.adjust(1).as_markup()
     )
+    
+    # Удаляем предыдущее сообщение
+    await callback.message.delete()
+    
     session.close()
 
 @dp.callback_query(lambda c: c.data.startswith('add_'))
@@ -244,7 +268,7 @@ async def process_checkout(callback: types.CallbackQuery):
 async def back_to_main(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "Выберите интересующий вас раздел:",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_keyboard(callback.from_user.id)
     )
 
 @dp.callback_query(lambda c: c.data == 'back_to_categories')
@@ -253,6 +277,66 @@ async def back_to_categories(callback: types.CallbackQuery):
         "Выберите категорию пирогов:",
         reply_markup=get_category_keyboard()
     )
+
+# Новые обработчики для администратора
+@dp.message(lambda message: message.text == "📋 Заказы")
+async def show_orders(message: types.Message):
+    session = Session()
+    admin = session.query(Admin).filter_by(user_id=message.from_user.id, is_active=True).first()
+    
+    if not admin:
+        await message.answer("У вас нет прав администратора")
+        return
+    
+    orders = session.query(Order).filter_by(status='completed').all()
+    
+    if not orders:
+        await message.answer("Нет оформленных заказов")
+        return
+    
+    orders_text = "Список оформленных заказов:\n\n"
+    for order in orders:
+        product = session.query(Product).get(order.product_id)
+        orders_text += (
+            f"Заказ #{order.id}\n"
+            f"Пользователь: {order.user_id}\n"
+            f"Товар: {product.name}\n"
+            f"Количество: {order.quantity}\n"
+            f"Дата: {order.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Статус: {order.status}\n\n"
+        )
+    
+    await message.answer(orders_text)
+    session.close()
+
+@dp.message(lambda message: message.text == "🧺 Корзины")
+async def show_carts(message: types.Message):
+    session = Session()
+    admin = session.query(Admin).filter_by(user_id=message.from_user.id, is_active=True).first()
+    
+    if not admin:
+        await message.answer("У вас нет прав администратора")
+        return
+    
+    # Получаем все активные корзины (заказы со статусом pending)
+    carts = session.query(Order).filter_by(status='pending').all()
+    
+    if not carts:
+        await message.answer("Нет активных корзин")
+        return
+    
+    carts_text = "Список активных корзин:\n\n"
+    for cart in carts:
+        product = session.query(Product).get(cart.product_id)
+        carts_text += (
+            f"Корзина пользователя: {cart.user_id}\n"
+            f"Товар: {product.name}\n"
+            f"Количество: {cart.quantity}\n"
+            f"Дата добавления: {cart.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        )
+    
+    await message.answer(carts_text)
+    session.close()
 
 # Запуск бота
 async def main():
