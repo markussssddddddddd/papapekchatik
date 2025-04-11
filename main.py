@@ -162,16 +162,25 @@ async def show_cart(message: types.Message):
         return
     
     total = 0
-    cart_text = "Ваша корзина:\n\n"
+    cart_text = "🛒 Ваша корзина:\n\n"
     
     for order in orders:
         product = session.query(Product).get(order.product_id)
-        cart_text += f"{product.name} - {order.quantity} шт. x {product.price} руб.\n"
-        total += product.price * order.quantity
+        # Учитываем скидку при расчете цены
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        cart_text += f"{product.name} - {order.quantity} шт. x {price:.2f} руб."
+        if product.discount > 0:
+            cart_text += f" (-{int(product.discount * 100)}%)"
+        cart_text += "\n"
+        total += price * order.quantity
     
-    cart_text += f"\nИтого: {total} руб."
+    cart_text += f"\n💰 Итого: {total:.2f} руб."
     
-    await message.answer(cart_text, reply_markup=get_cart_keyboard())
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"))
+    
+    await message.answer(cart_text, reply_markup=keyboard.adjust(1).as_markup())
     session.close()
 
 @dp.message(lambda message: message.text == "🚚 Условия доставки")
@@ -346,6 +355,68 @@ async def show_carts(message: types.Message):
     
     await message.answer(carts_text)
     session.close()
+
+@dp.callback_query(lambda c: c.data.startswith('add_'))
+async def add_to_cart(callback: types.CallbackQuery):
+    product_id = int(callback.data.split('_')[1])
+    session = Session()
+    
+    # Получаем продукт
+    product = session.query(Product).get(product_id)
+    
+    # Проверяем, есть ли уже такой товар в корзине
+    existing_order = session.query(Order).filter_by(
+        user_id=callback.from_user.id,
+        product_id=product_id,
+        status='pending'
+    ).first()
+    
+    if existing_order:
+        existing_order.quantity += 1
+    else:
+        new_order = Order(
+            user_id=callback.from_user.id,
+            product_id=product_id,
+            quantity=1
+        )
+        session.add(new_order)
+    
+    session.commit()
+    
+    # Получаем все товары в корзине для отображения
+    orders = session.query(Order).filter_by(
+        user_id=callback.from_user.id,
+        status='pending'
+    ).all()
+    
+    total = 0
+    cart_text = "🛒 Ваша корзина:\n\n"
+    
+    for order in orders:
+        product = session.query(Product).get(order.product_id)
+        # Учитываем скидку при расчете цены
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        cart_text += f"{product.name} - {order.quantity} шт. x {price:.2f} руб."
+        if product.discount > 0:
+            cart_text += f" (-{int(product.discount * 100)}%)"
+        cart_text += "\n"
+        total += price * order.quantity
+    
+    cart_text += f"\n💰 Итого: {total:.2f} руб."
+    
+    # Создаем клавиатуру с кнопками
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_to_products_{product.category}"))
+    
+    # Отправляем сообщение с корзиной
+    await callback.message.answer(
+        cart_text,
+        reply_markup=keyboard.adjust(1).as_markup()
+    )
+    
+    session.close()
+    await callback.answer("Товар добавлен в корзину!")
 
 async def update_special_offers():
     """Обновляет акции каждый час"""
