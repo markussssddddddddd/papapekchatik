@@ -235,6 +235,68 @@ async def process_product(callback: types.CallbackQuery):
     
     session.close()
 
+@dp.callback_query(lambda c: c.data.startswith('add_'))
+async def add_to_cart(callback: types.CallbackQuery):
+    product_id = int(callback.data.split('_')[1])
+    session = Session()
+    
+    # Получаем продукт
+    product = session.query(Product).get(product_id)
+    
+    # Проверяем, есть ли уже такой товар в корзине
+    existing_order = session.query(Order).filter_by(
+        user_id=callback.from_user.id,
+        product_id=product_id,
+        status='pending'
+    ).first()
+    
+    if existing_order:
+        existing_order.quantity += 1
+    else:
+        new_order = Order(
+            user_id=callback.from_user.id,
+            product_id=product_id,
+            quantity=1
+        )
+        session.add(new_order)
+    
+    session.commit()
+    
+    # Получаем все товары в корзине для отображения
+    orders = session.query(Order).filter_by(
+        user_id=callback.from_user.id,
+        status='pending'
+    ).all()
+    
+    total = 0
+    cart_text = "🛒 Ваша корзина:\n\n"
+    
+    for order in orders:
+        product = session.query(Product).get(order.product_id)
+        # Учитываем скидку при расчете цены
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        cart_text += f"{product.name} - {order.quantity} шт. x {price:.2f} руб."
+        if product.discount > 0:
+            cart_text += f" (-{int(product.discount * 100)}%)"
+        cart_text += "\n"
+        total += price * order.quantity
+    
+    cart_text += f"\n💰 Итого: {total:.2f} руб."
+    
+    # Создаем клавиатуру с кнопками
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад к меню", callback_data="back_to_categories"))
+    
+    # Отправляем сообщение с корзиной
+    await callback.message.answer(
+        cart_text,
+        reply_markup=keyboard.adjust(1).as_markup()
+    )
+    
+    session.close()
+    await callback.answer("Товар добавлен в корзину!")
+
 @dp.callback_query(lambda c: c.data == 'checkout')
 async def process_checkout(callback: types.CallbackQuery):
     session = Session()
@@ -244,23 +306,40 @@ async def process_checkout(callback: types.CallbackQuery):
         await callback.answer("Корзина пуста!")
         return
     
-    # Обновляем статус заказов
+    # Формируем текст заказа
+    order_text = "📋 Ваш заказ:\n\n"
+    total = 0
+    
     for order in orders:
+        product = session.query(Product).get(order.product_id)
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        order_text += f"{product.name} - {order.quantity} шт. x {price:.2f} руб."
+        if product.discount > 0:
+            order_text += f" (-{int(product.discount * 100)}%)"
+        order_text += "\n"
+        total += price * order.quantity
+        
+        # Обновляем статус заказа
         order.status = 'completed'
+    
+    order_text += f"\n💰 Итого: {total:.2f} руб."
+    
+    # Время доставки (текущее время + 5 секунд)
+    delivery_time = datetime.now() + timedelta(seconds=5)
+    
+    order_text += f"\n\n🚚 Ваш заказ будет доставлен в {delivery_time.strftime('%H:%M:%S')}"
     
     session.commit()
     session.close()
     
-    delivery_time = datetime.now() + timedelta(seconds=5)
-    
+    # Отправляем подтверждение заказа
     await callback.message.edit_text(
-        "Ваш заказ оформлен! 🎉\n"
-        f"Ожидайте доставку в {delivery_time.strftime('%H:%M:%S')}"
+        f"✅ Заказ успешно оформлен!\n\n{order_text}"
     )
     
     # Имитация доставки через 5 секунд
     await asyncio.sleep(5)
-    await callback.message.answer("Спасибо, что выбрали нас! Ваш заказ доставлен. 🎉")
+    await callback.message.answer("🎉 Спасибо за заказ! Ваш заказ доставлен.")
 
 @dp.callback_query(lambda c: c.data == 'back')
 async def handle_back(callback: types.CallbackQuery):
