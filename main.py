@@ -92,7 +92,6 @@ def get_category_keyboard():
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(text="🍪 Сладкие пироги", callback_data="category_sweet"))
     keyboard.add(InlineKeyboardButton(text="🥧 Сытные пироги", callback_data="category_savory"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main"))
     return keyboard.adjust(2).as_markup()
 
 def get_products_keyboard(category):
@@ -112,7 +111,7 @@ def get_products_keyboard(category):
             callback_data=f"product_{product.id}"
         ))
     
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"))
     session.close()
     return keyboard.adjust(1).as_markup()
 
@@ -205,15 +204,9 @@ async def process_product(callback: types.CallbackQuery):
     session = Session()
     product = session.query(Product).get(product_id)
     
-    # Сохраняем текущее состояние в историю
-    user_id = callback.from_user.id
-    if user_id not in user_navigation_history:
-        user_navigation_history[user_id] = []
-    user_navigation_history[user_id].append(('category', product.category))
-    
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(text="➕ Добавить в корзину", callback_data=f"add_{product_id}"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_to_products_{product.category}"))
     
     # Учитываем скидку при отображении цены
     display_price = product.price * (1 - product.discount) if product.discount > 0 else product.price
@@ -234,68 +227,6 @@ async def process_product(callback: types.CallbackQuery):
     await callback.message.delete()
     
     session.close()
-
-@dp.callback_query(lambda c: c.data.startswith('add_'))
-async def add_to_cart(callback: types.CallbackQuery):
-    product_id = int(callback.data.split('_')[1])
-    session = Session()
-    
-    # Получаем продукт
-    product = session.query(Product).get(product_id)
-    
-    # Проверяем, есть ли уже такой товар в корзине
-    existing_order = session.query(Order).filter_by(
-        user_id=callback.from_user.id,
-        product_id=product_id,
-        status='pending'
-    ).first()
-    
-    if existing_order:
-        existing_order.quantity += 1
-    else:
-        new_order = Order(
-            user_id=callback.from_user.id,
-            product_id=product_id,
-            quantity=1
-        )
-        session.add(new_order)
-    
-    session.commit()
-    
-    # Получаем все товары в корзине для отображения
-    orders = session.query(Order).filter_by(
-        user_id=callback.from_user.id,
-        status='pending'
-    ).all()
-    
-    total = 0
-    cart_text = "🛒 Ваша корзина:\n\n"
-    
-    for order in orders:
-        product = session.query(Product).get(order.product_id)
-        # Учитываем скидку при расчете цены
-        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
-        cart_text += f"{product.name} - {order.quantity} шт. x {price:.2f} руб."
-        if product.discount > 0:
-            cart_text += f" (-{int(product.discount * 100)}%)"
-        cart_text += "\n"
-        total += price * order.quantity
-    
-    cart_text += f"\n💰 Итого: {total:.2f} руб."
-    
-    # Создаем клавиатуру с кнопками
-    keyboard = InlineKeyboardBuilder()
-    keyboard.add(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад к меню", callback_data="back_to_categories"))
-    
-    # Отправляем сообщение с корзиной
-    await callback.message.answer(
-        cart_text,
-        reply_markup=keyboard.adjust(1).as_markup()
-    )
-    
-    session.close()
-    await callback.answer("Товар добавлен в корзину!")
 
 @dp.callback_query(lambda c: c.data == 'checkout')
 async def process_checkout(callback: types.CallbackQuery):
@@ -341,46 +272,19 @@ async def process_checkout(callback: types.CallbackQuery):
     await asyncio.sleep(5)
     await callback.message.answer("🎉 Спасибо за заказ! Ваш заказ доставлен.")
 
-@dp.callback_query(lambda c: c.data == 'back')
-async def handle_back(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    
-    # Если у пользователя есть история навигации
-    if user_id in user_navigation_history and user_navigation_history[user_id]:
-        # Получаем последнее состояние и удаляем его из истории
-        last_state = user_navigation_history[user_id].pop()
-        
-        if last_state[0] == 'category':
-            # Возвращаемся к выбору категории
-            await callback.message.edit_text(
-                "Выберите категорию пирогов:",
-                reply_markup=get_category_keyboard()
-            )
-        elif last_state[0] == 'main':
-            # Возвращаемся в главное меню
-            await callback.message.edit_text(
-                "Выберите интересующий вас раздел:",
-                reply_markup=get_main_keyboard(callback.from_user.id)
-            )
-    else:
-        # Если истории нет, возвращаемся в главное меню
-        await callback.message.edit_text(
-            "Выберите интересующий вас раздел:",
-            reply_markup=get_main_keyboard(callback.from_user.id)
-        )
-
-@dp.callback_query(lambda c: c.data == 'back_to_main')
-async def back_to_main(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "Выберите интересующий вас раздел:",
-        reply_markup=get_main_keyboard(callback.from_user.id)
-    )
-
 @dp.callback_query(lambda c: c.data == 'back_to_categories')
 async def back_to_categories(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "Выберите категорию пирогов:",
         reply_markup=get_category_keyboard()
+    )
+
+@dp.callback_query(lambda c: c.data.startswith('back_to_products_'))
+async def back_to_products(callback: types.CallbackQuery):
+    category = callback.data.split('_')[-1]
+    await callback.message.edit_text(
+        "Выберите пирог:",
+        reply_markup=get_products_keyboard(category)
     )
 
 # Новые обработчики для администратора
