@@ -215,7 +215,7 @@ async def process_product(callback: types.CallbackQuery):
     
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(text="➕ Добавить в корзину", callback_data=f"add_{product_id}"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_to_products_{product.category}"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад к списку", callback_data=f"back_to_products_{product.category}"))
     
     # Учитываем скидку при отображении цены
     display_price = product.price * (1 - product.discount) if product.discount > 0 else product.price
@@ -407,7 +407,7 @@ async def add_to_cart(callback: types.CallbackQuery):
     # Создаем клавиатуру с кнопками
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_to_products_{product.category}"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Вернуться к покупкам", callback_data=f"back_to_products_{product.category}"))
     
     # Отправляем сообщение с корзиной
     await callback.message.answer(
@@ -416,7 +416,7 @@ async def add_to_cart(callback: types.CallbackQuery):
     )
     
     session.close()
-    await callback.answer("Товар добавлен в корзину!")
+    await callback.answer("✅ Товар добавлен в корзину!")
 
 async def update_special_offers():
     """Обновляет акции каждый час"""
