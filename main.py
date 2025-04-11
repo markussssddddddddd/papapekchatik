@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -26,6 +27,9 @@ engine = create_engine('sqlite:///bakery.db')
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 
+# Словарь для хранения истории навигации пользователей
+user_navigation_history = {}
+
 # Модели данных
 class Product(Base):
     __tablename__ = 'products'
@@ -36,6 +40,8 @@ class Product(Base):
     category = Column(String)
     image_url = Column(String)
     is_special = Column(Integer, default=0)
+    discount = Column(Float, default=0.0)  # Добавляем поле для скидки
+
 
 class Order(Base):
     __tablename__ = 'orders'
@@ -45,6 +51,7 @@ class Order(Base):
     quantity = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
     status = Column(String, default='pending')
+
 
 class Admin(Base):
     __tablename__ = 'admins'
@@ -94,12 +101,18 @@ def get_products_keyboard(category):
     keyboard = InlineKeyboardBuilder()
     
     for product in products:
+        # Учитываем скидку при отображении цены
+        display_price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        price_text = f"{display_price:.2f} руб."
+        if product.discount > 0:
+            price_text += f" (-{int(product.discount * 100)}%)"
+        
         keyboard.add(InlineKeyboardButton(
-            text=f"{product.name} - {product.price} руб.",
+            text=f"{product.name} - {price_text}",
             callback_data=f"product_{product.id}"
         ))
     
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
     session.close()
     return keyboard.adjust(1).as_markup()
 
@@ -192,16 +205,28 @@ async def process_product(callback: types.CallbackQuery):
     session = Session()
     product = session.query(Product).get(product_id)
     
+    # Сохраняем текущее состояние в историю
+    user_id = callback.from_user.id
+    if user_id not in user_navigation_history:
+        user_navigation_history[user_id] = []
+    user_navigation_history[user_id].append(('category', product.category))
+    
     keyboard = InlineKeyboardBuilder()
     keyboard.add(InlineKeyboardButton(text="➕ Добавить в корзину", callback_data=f"add_{product_id}"))
-    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
+    
+    # Учитываем скидку при отображении цены
+    display_price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+    price_text = f"{display_price:.2f} руб."
+    if product.discount > 0:
+        price_text += f" (-{int(product.discount * 100)}%)"
     
     # Отправляем фотографию продукта
     await callback.message.answer_photo(
         photo=product.image_url,
         caption=f"{product.name}\n\n"
                 f"{product.description}\n\n"
-                f"Цена: {product.price} BYN",
+                f"Цена: {price_text}",
         reply_markup=keyboard.adjust(1).as_markup()
     )
     
@@ -209,33 +234,6 @@ async def process_product(callback: types.CallbackQuery):
     await callback.message.delete()
     
     session.close()
-
-@dp.callback_query(lambda c: c.data.startswith('add_'))
-async def add_to_cart(callback: types.CallbackQuery):
-    product_id = int(callback.data.split('_')[1])
-    session = Session()
-    
-    # Проверяем, есть ли уже такой товар в корзине
-    existing_order = session.query(Order).filter_by(
-        user_id=callback.from_user.id,
-        product_id=product_id,
-        status='pending'
-    ).first()
-    
-    if existing_order:
-        existing_order.quantity += 1
-    else:
-        new_order = Order(
-            user_id=callback.from_user.id,
-            product_id=product_id,
-            quantity=1
-        )
-        session.add(new_order)
-    
-    session.commit()
-    session.close()
-    
-    await callback.answer("Товар добавлен в корзину!")
 
 @dp.callback_query(lambda c: c.data == 'checkout')
 async def process_checkout(callback: types.CallbackQuery):
@@ -263,6 +261,34 @@ async def process_checkout(callback: types.CallbackQuery):
     # Имитация доставки через 5 секунд
     await asyncio.sleep(5)
     await callback.message.answer("Спасибо, что выбрали нас! Ваш заказ доставлен. 🎉")
+
+@dp.callback_query(lambda c: c.data == 'back')
+async def handle_back(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Если у пользователя есть история навигации
+    if user_id in user_navigation_history and user_navigation_history[user_id]:
+        # Получаем последнее состояние и удаляем его из истории
+        last_state = user_navigation_history[user_id].pop()
+        
+        if last_state[0] == 'category':
+            # Возвращаемся к выбору категории
+            await callback.message.edit_text(
+                "Выберите категорию пирогов:",
+                reply_markup=get_category_keyboard()
+            )
+        elif last_state[0] == 'main':
+            # Возвращаемся в главное меню
+            await callback.message.edit_text(
+                "Выберите интересующий вас раздел:",
+                reply_markup=get_main_keyboard(callback.from_user.id)
+            )
+    else:
+        # Если истории нет, возвращаемся в главное меню
+        await callback.message.edit_text(
+            "Выберите интересующий вас раздел:",
+            reply_markup=get_main_keyboard(callback.from_user.id)
+        )
 
 @dp.callback_query(lambda c: c.data == 'back_to_main')
 async def back_to_main(callback: types.CallbackQuery):
@@ -338,8 +364,35 @@ async def show_carts(message: types.Message):
     await message.answer(carts_text)
     session.close()
 
+async def update_special_offers():
+    """Обновляет акции каждый час"""
+    while True:
+        try:
+            session = Session()
+            
+            # Сбрасываем все текущие акции
+            session.query(Product).update({Product.is_special: 0, Product.discount: 0.0})
+            
+            # Выбираем случайный продукт для акции
+            all_products = session.query(Product).all()
+            if all_products:
+                special_product = random.choice(all_products)
+                special_product.is_special = 1
+                special_product.discount = 0.2  # 20% скидка
+            
+            session.commit()
+            session.close()
+            
+            # Ждем 1 час перед следующим обновлением
+            await asyncio.sleep(3600)
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении акций: {e}")
+            await asyncio.sleep(60)  # В случае ошибки ждем 1 минуту перед повторной попыткой
+
 # Запуск бота
 async def main():
+    # Запускаем обновление акций в фоновом режиме
+    asyncio.create_task(update_special_offers())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
