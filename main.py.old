@@ -1,0 +1,1090 @@
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, Text, ForeignKey
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+import os
+from dotenv import load_dotenv
+
+# Загрузка переменных окружения
+load_dotenv()
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
+# Инициализация бота и диспетчера
+bot = Bot(token=os.getenv("BOT_TOKEN"))
+dp = Dispatcher()
+
+# Инициализация базы данных (только один раз!)
+engine = create_engine('sqlite:///bakery.db')
+Base = declarative_base()
+Session = sessionmaker(bind=engine)
+
+# Словарь для хранения истории навигации пользователей
+user_navigation_history = {}
+
+# Модели данных
+class Product(Base):
+    __tablename__ = 'products'
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    description = Column(String)
+    price = Column(Float)
+    category = Column(String)
+    image_url = Column(String)
+    is_special = Column(Integer, default=0)
+    discount = Column(Float, default=0.0)
+    rating = Column(Float, default=0.0)
+    ingredients = Column(String)
+    calories = Column(Integer, default=0)
+    preparation_time = Column(Integer, default=60)
+
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    telegram_id = Column(Integer, unique=True, nullable=False)
+    username = Column(String)
+    phone = Column(String)
+    address = Column(String)
+    bonus_points = Column(Integer, default=0)
+    last_order_date = Column(DateTime)
+    favorite_category = Column(String)
+    orders = relationship("Order", back_populates="user")
+
+class Order(Base):
+    __tablename__ = 'orders'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    product_id = Column(Integer)
+    quantity = Column(Integer)
+    created_at = Column(DateTime, default=datetime.now)
+    status = Column(String, default='pending')
+    delivery_method = Column(String)
+    address = Column(String)
+    delivery_date = Column(String)
+    delivery_time = Column(String)
+    total_price = Column(Float, default=0.0)
+    review_requested = Column(Boolean, default=False)
+    completed_at = Column(DateTime)
+    user = relationship("User", back_populates="orders")
+
+class Review(Base):
+    __tablename__ = 'reviews'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    product_id = Column(Integer, ForeignKey('products.id'))
+    order_id = Column(Integer, ForeignKey('orders.id'))
+    rating = Column(Integer)
+    comment = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+    is_anonymous = Column(Boolean, default=False)
+
+class Admin(Base):
+    __tablename__ = 'admins'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, unique=True)
+    username = Column(String)
+    is_active = Column(Boolean, default=True)
+
+class LocalStorage(Base):
+    __tablename__ = 'local_storage'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    key = Column(String, nullable=False)
+    value = Column(String, nullable=False)
+
+class Notification(Base):
+    __tablename__ = 'notifications'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    message = Column(Text)
+    scheduled_time = Column(DateTime)
+    sent = Column(Boolean, default=False)
+    notification_type = Column(String)
+
+# Создание таблиц (только если их нет)
+Base.metadata.create_all(engine)
+
+# Клавиатуры
+def get_main_keyboard(user_id=None):
+    session = Session()
+    is_admin = False
+    if user_id:
+        admin = session.query(Admin).filter_by(user_id=user_id, is_active=True).first()
+        is_admin = bool(admin)
+    session.close()
+
+    keyboard = [
+        [KeyboardButton(text="🍰 Меню"), KeyboardButton(text="🎁 Акции")],
+        [KeyboardButton(text="🛒 Корзина"), KeyboardButton(text="⭐ Популярное")],
+        [KeyboardButton(text="🚚 Условия доставки"), KeyboardButton(text="💳 Бонусы")],
+        [KeyboardButton(text="📱 Мой профиль"), KeyboardButton(text="ℹ️ О нас")],
+        [KeyboardButton(text="📝 Оставить отзыв"), KeyboardButton(text="🎂 Индивидуальный заказ")]
+    ]
+
+    if is_admin:
+        keyboard.extend([
+            [KeyboardButton(text="📋 Заказы"), KeyboardButton(text="🧺 Корзины")],
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💬 Отзывы")]
+        ])
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+def get_category_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="🍪 Сладкие пироги", callback_data="category_sweet"))
+    keyboard.add(InlineKeyboardButton(text="🥧 Сытные пироги", callback_data="category_savory"))
+    keyboard.add(InlineKeyboardButton(text="🎂 Торты", callback_data="category_cakes"))
+    keyboard.add(InlineKeyboardButton(text="🔥 Хиты продаж", callback_data="category_popular"))
+    keyboard.add(InlineKeyboardButton(text="🌟 Новинки", callback_data="category_new"))
+    return keyboard.adjust(2).as_markup()
+
+def get_products_keyboard(category):
+    session = Session()
+    if category == "popular":
+        products = session.query(Product).filter(Product.rating >= 4.0).all()
+    elif category == "new":
+        products = session.query(Product).all()[:3]
+    else:
+        products = session.query(Product).filter_by(category=category).all()
+    
+    keyboard = InlineKeyboardBuilder()
+    for product in products:
+        display_price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        price_text = f"{display_price:.0f} byn"
+        if product.discount > 0:
+            price_text += f" (-{int(product.discount * 100)}%)"
+        rating_stars = "⭐" * int(product.rating) if product.rating > 0 else ""
+        product_text = f"{product.name} {rating_stars} - {price_text}"
+        keyboard.add(InlineKeyboardButton(
+            text=product_text,
+            callback_data=f"product_{product.id}"
+        ))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"))
+    session.close()
+    return keyboard.adjust(1).as_markup()
+
+def get_payment_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="💵 Наличными", callback_data="pay_cash"))
+    keyboard.add(InlineKeyboardButton(text="💳 Картой при получении", callback_data="pay_card"))
+    keyboard.add(InlineKeyboardButton(text="🏦 Безналичный расчет", callback_data="pay_bank"))
+    return keyboard.adjust(1).as_markup()
+
+# Получаем или создаём пользователя
+def get_or_create_user(session, telegram_id, username):
+    user = session.query(User).filter_by(telegram_id=telegram_id).first()
+    if not user:
+        user = User(telegram_id=telegram_id, username=username)
+        session.add(user)
+        session.commit()
+    return user
+
+# Обработчики команд
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    session = Session()
+    user = get_or_create_user(session, message.from_user.id, message.from_user.username)
+    is_new_user = user.last_order_date is None
+    if is_new_user:
+        welcome_text = (
+            "🎉 Добро пожаловать в нашу пекарню! 🥖\n\n"
+            "🎁 Специально для новых клиентов - скидка 10% на первый заказ!\n"
+            "Используйте промокод: НОВИЧОК\n\n"
+            "Выберите интересующий вас раздел:"
+        )
+        user.bonus_points += 100
+    else:
+        welcome_text = (
+            f"С возвращением, {user.username or 'друг'}! 🤗\n"
+            f"💰 Ваши бонусные баллы: {user.bonus_points}\n\n"
+            "Выберите интересующий вас раздел:"
+        )
+    session.commit()
+    session.close()
+    await message.answer(
+        welcome_text,
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+@dp.message(lambda message: message.text == "🍰 Меню")
+async def show_menu(message: types.Message):
+    await message.answer(
+        "🍰 Наше меню:\n\nВыберите категорию пирогов...",
+        reply_markup=get_category_keyboard()
+    )
+
+@dp.message(lambda message: message.text == "⭐ Популярное")
+async def show_popular(message: types.Message):
+    session = Session()
+    popular_products = session.query(Product).filter(Product.rating >= 4.0).limit(5).all()
+    
+    if not popular_products:
+        await message.answer("Пока нет популярных товаров с высокими оценками")
+        session.close()
+        return
+    
+    text = "⭐ Наши хиты продаж:\n\n"
+    keyboard = InlineKeyboardBuilder()
+    
+    for product in popular_products:
+        rating_stars = "⭐" * int(product.rating)
+        text += f"• {product.name} {rating_stars} ({product.rating:.1f}) - {product.price:.0f} byn\n"
+        keyboard.add(InlineKeyboardButton(
+            text=f"Заказать {product.name}",
+            callback_data=f"product_{product.id}"
+        ))
+    
+    await message.answer(text, reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.message(lambda message: message.text == "💳 Бонусы")
+async def show_bonus_info(message: types.Message):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=message.from_user.id).first()
+    
+    if not user:
+        await message.answer("Пользователь не найден")
+        session.close()
+        return
+    
+    
+    # Рассчитываем историю заказов
+    total_orders = session.query(Order).filter_by(user_id=user.id, status='completed').count()
+    total_spent = session.query(Order).filter_by(user_id=user.id, status='completed').with_entities(
+        Order.total_price).all()
+    total_amount = sum([order[0] or 0 for order in total_spent])
+    
+    bonus_text = (
+        f"💳 Ваша бонусная программа:\n\n"
+        f"💰 Доступно баллов: {user.bonus_points}\n"
+        f"📊 Заказов выполнено: {total_orders}\n"
+        f"💸 Общая сумма заказов: {total_amount:.0f}\n\n"
+        f"💡 Как накопить баллы:\n"
+        f"• 1 byn= 1 бонусный балл\n"
+        f"• Отзыв с фото = +5 баллов\n"
+        f"• День рождения = +20 баллов\n\n"
+        f"🎁 Как потратить:\n"
+        f"• 10 баллов = 5₽ скидка\n"
+        f"• 50 баллов = бесплатная доставка"
+    )
+    
+    await message.answer(bonus_text)
+    session.close()
+
+@dp.message(lambda message: message.text == "📱 Мой профиль")
+async def show_profile(message: types.Message):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=message.from_user.id).first()
+    
+    if not user:
+        await message.answer("Профиль не найден")
+        session.close()
+        return
+    
+    last_order = session.query(Order).filter_by(user_id=user.id, status='completed').order_by(Order.created_at.desc()).first()
+    
+    profile_text = (
+        f"📱 Ваш профиль:\n\n"
+        f"👤 Имя: {user.username or 'Не указано'}\n"
+        f"📞 Телефон: {user.phone or 'Не указан'}\n"
+        f"📍 Адрес: {user.address or 'Не указан'}\n"
+        f"💰 Бонусы: {user.bonus_points}\n"
+        f"❤️ Любимая категория: {user.favorite_category or 'Не определена'}\n"
+    )
+    
+    if last_order:
+        profile_text += f"🕐 Последний заказ: {last_order.created_at.strftime('%d.%m.%Y')}\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="✏️ Редактировать профиль", callback_data="edit_profile"))
+    keyboard.add(InlineKeyboardButton(text="📋 История заказов", callback_data="order_history"))
+    
+    await message.answer(profile_text, reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.message(lambda message: message.text == "🎂 Индивидуальный заказ")
+async def custom_order(message: types.Message):
+    await message.answer(
+        "🎂 Индивидуальный заказ\n\n"
+        "Мы можем приготовить торт по вашему рецепту или пожеланиям!\n\n"
+        "📝 Опишите желаемый торт :\n"
+        "• Размер (количество персон)\n"
+        "• Начинка\n"
+        "• Особые пожелания\n"
+        "• Дата готовности\n\n"
+        "⏰ Минимальное время изготовления: 24 часа\n"
+        "💰 Стоимость рассчитывается индивидуально\n\n"
+        "Напишите ваши пожелания, и мы свяжемся с вами!"
+    )
+
+@dp.message(lambda message: message.text == "🎁 Акции")
+async def show_specials(message: types.Message):
+    session = Session()
+    special_products = session.query(Product).filter(Product.discount > 0).all()
+    
+    specials_text = "🎁 Текущие акции:\n\n"
+    keyboard = InlineKeyboardBuilder()
+    
+    if special_products:
+        for product in special_products:
+            old_price = product.price
+            new_price = product.price * (1 - product.discount)
+            discount_percent = int(product.discount * 100)
+            
+            specials_text += (
+                f"🔥 {product.name}\n"
+                f"💰 {new_price:.0f} ~~{old_price:.0f}₽~~ (-{discount_percent}%)\n\n"
+            )
+            
+            keyboard.add(InlineKeyboardButton(
+                text=f"Заказать {product.name}",
+                callback_data=f"product_{product.id}"
+            ))
+    else:
+        specials_text += "К сожалению, специальных предложений пока нет 😔\n"
+        specials_text += "Но у нас есть постоянные скидки для постоянных клиентов!"
+    
+    # Добавляем общие предложения
+    specials_text += (
+        "\n🎯 Постоянные предложения:\n"
+        "• При заказе от 80 byn - бесплатная доставка\n"
+        "• Скидка 5% при оплате бонусами\n"
+        "• Каждый 10-й пирог в подарок!"
+    )
+    
+    await message.answer(specials_text, reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.message(lambda message: message.text == "🛒 Корзина")
+async def show_cart(message: types.Message):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=message.from_user.id).first()
+    if not user:
+        await message.answer("В корзине ничего нет")
+        session.close()
+        return
+    
+    orders = session.query(Order).filter_by(user_id=user.id, status='pending').all()
+    if not orders:
+        await message.answer("🛒 Корзина пуста\n\nПосмотрите наше меню и добавьте что-нибудь вкусное!")
+        session.close()
+        return
+    
+    total = 0
+    cart_text = "🛒 Ваша корзина:\n\n"
+    
+    for order in orders:
+        product = session.query(Product).get(order.product_id)
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        item_total = price * order.quantity
+        
+        cart_text += f"• {product.name}\n"
+        cart_text += f"  {order.quantity} шт. × {price:.0f} = {item_total:.0f} byn\n"
+        if product.discount > 0:
+            cart_text += f"  💸 Скидка {int(product.discount * 100)}%\n"
+        cart_text += "\n"
+        total += item_total
+    
+    # Рассчитываем доставку
+    delivery_cost = 0 if total >= 80 else 8 
+    if delivery_cost > 0:
+        cart_text += f"🚚 Доставка: {delivery_cost} byn\n"
+        total += delivery_cost
+    else:
+        cart_text += "🚚 Доставка: БЕСПЛАТНО\n"
+    
+    cart_text += f"\n💰 Итого: {total:.0f} byn"
+    
+    # Показываем возможность использования бонусов
+    if user.bonus_points >= 100:
+        possible_discount = min(user.bonus_points // 2, total * 0.3)  # Максимум 30% от суммы
+        cart_text += f"\n🎁 Доступна скидка бонусами: до {possible_discount:.0f} byn"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="start_checkout"))
+    keyboard.add(InlineKeyboardButton(text="🗑 Очистить корзину", callback_data="clear_cart"))
+    keyboard.add(InlineKeyboardButton(text="➕ Добавить еще", callback_data="back_to_categories"))
+    
+    await message.answer(cart_text, reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.message(lambda message: message.text == "🚚 Условия доставки")
+async def show_delivery_info(message: types.Message):
+    await message.answer(
+        "🚚 Условия доставки:\n\n"
+        "🏠 Обычная доставка:\n"
+        "• По городу: 8byn\n"
+        "• Время: 2-3 часа\n"
+        "• Бесплатно при заказе от 80byn\n\n"
+        "🏪 Самовывоз:\n"
+        "• Независимости 43\n"
+        "• Независимости 60\n"
+        "• Время: 30-45 минут\n"
+        "• Скидка 5% от суммы заказа\n\n"
+        "⏰ Режим работы: 10:00 - 22:00"
+    )
+
+@dp.message(lambda message: message.text == "ℹ️ О нас")
+async def show_about(message: types.Message):
+    await message.answer(
+        "ℹ️ О нашей пекарне 🥖\n\n"
+        "👨‍🍳 Семейная пекарня \n"
+        "🌱 Только натуральные ингредиенты\n"
+        "👑 Традиционные рецепты + современные технологии\n\n"
+        "🏆 Наши достижения:\n"
+        "• Лучшая пекарня города 2023\n"
+        "• 5000+ довольных клиентов\n"
+        "• Средний рейтинг 4.8/5\n\n"
+        "📞 Контакты:\n"
+        "• Телефон: +375-44-554-30-43\n"
+        "• Instagram: @papapek.by\n"
+        "• Адреса: Независимости 43, 60"
+    )
+
+@dp.message(lambda message: message.text == "📝 Оставить отзыв")
+async def leave_review(message: types.Message):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=message.from_user.id).first()
+    
+    if not user:
+        await message.answer("Пользователь не найден")
+        session.close()
+        return
+    
+    # Находим завершенные заказы без отзывов
+    completed_orders = session.query(Order).filter_by(
+        user_id=user.id, 
+        status='completed'
+    ).all()
+    
+    if not completed_orders:
+        await message.answer("У вас пока нет завершенных заказов для оценки")
+        session.close()
+        return
+    
+    # Показываем заказы для выбора
+    keyboard = InlineKeyboardBuilder()
+    
+    for order in completed_orders[-5:]:  # Последние 5 заказов
+        product = session.query(Product).get(order.product_id)
+        existing_review = session.query(Review).filter_by(order_id=order.id).first()
+        
+        if not existing_review:
+            keyboard.add(InlineKeyboardButton(
+                text=f"Оценить: {product.name}",
+                callback_data=f"review_order_{order.id}"
+            ))
+    
+    if keyboard.buttons:
+        await message.answer(
+            "📝 Выберите заказ для оценки:",
+            reply_markup=keyboard.adjust(1).as_markup()
+        )
+    else:
+        await message.answer("Все ваши заказы уже оценены! Спасибо за обратную связь 🙏")
+    
+    session.close()
+
+# Обработчики callback-запросов
+@dp.callback_query(lambda c: c.data.startswith('category_'))
+async def process_category(callback: types.CallbackQuery):
+    category = callback.data.split('_')[1]
+    
+    category_names = {
+        'sweet': 'Сладкие пироги',
+        'savory': 'Сытные пироги',
+        'cakes': 'Торты',
+        'popular': 'Популярные',
+        'new': 'Новинки'
+    }
+    
+    await callback.message.edit_text(
+        f"🍰 {category_names.get(category, 'Пироги')}:\n\nВыберите пирог:",
+        reply_markup=get_products_keyboard(category)
+    )
+
+@dp.callback_query(lambda c: c.data.startswith('product_'))
+async def process_product(callback: types.CallbackQuery):
+    product_id = int(callback.data.split('_')[1])
+    session = Session()
+    product = session.query(Product).get(product_id)
+    if not product:
+        await callback.message.answer("Пирог не найден.")
+        session.close()
+        return
+
+    # Формируем подробное описание
+    price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+    
+    product_text = f"🥧 {product.name}\n\n"
+    product_text += f"📝 {product.description}\n\n"
+    
+    if product.ingredients:
+        product_text += f"🥄 Состав: {product.ingredients}\n"
+    
+    if product.calories > 0:
+        product_text += f"🔥 Калорийность: {product.calories} ккал/100г\n"
+    
+    product_text += f"⏰ Время приготовления: {product.preparation_time} мин\n"
+    
+    if product.rating > 0:
+        stars = "⭐" * int(product.rating)
+        product_text += f"⭐ Рейтинг: {stars} ({product.rating:.1f})\n"
+    
+    product_text += f"\n💰 Цена: {price:.0f}"
+    
+    if product.discount > 0:
+        product_text += f" ~~{product.price:.0f}~~ (-{int(product.discount * 100)}%)"
+
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="➕ В корзину", callback_data=f"add_{product_id}"))
+    keyboard.add(InlineKeyboardButton(text="📋 Отзывы", callback_data=f"reviews_{product_id}"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"back_to_products_{product.category}"))
+
+    await callback.message.edit_text(product_text, reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.callback_query(lambda c: c.data.startswith('add_'))
+async def add_to_cart(callback: types.CallbackQuery):
+    product_id = int(callback.data.split('_')[1])
+    session = Session()
+    
+    user = session.query(User).filter_by(telegram_id=callback.from_user.id).first()
+    if not user:
+        user = get_or_create_user(session, callback.from_user.id, callback.from_user.username)
+    
+    product = session.query(Product).get(product_id)
+    if not product:
+        await callback.answer("Товар не найден")
+        session.close()
+        return
+    
+    # Проверяем, есть ли уже этот товар в корзине
+    existing_order = session.query(Order).filter_by(
+        user_id=user.id,
+        product_id=product_id,
+        status='pending'
+    ).first()
+    
+    if existing_order:
+        existing_order.quantity += 1
+    else:
+        new_order = Order(
+            user_id=user.id,
+            product_id=product_id,
+            quantity=1
+        )
+        session.add(new_order)
+    
+    session.commit()
+    
+    await callback.answer(f"✅ {product.name} добавлен в корзину!")
+    
+    # Показываем кнопки для продолжения покупок или перехода в корзину
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="🛒 Перейти в корзину", callback_data="go_to_cart"))
+    keyboard.add(InlineKeyboardButton(text="➕ Добавить еще", callback_data="back_to_categories"))
+    
+    await callback.message.edit_reply_markup(reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.callback_query(lambda c: c.data.startswith('reviews_'))
+async def show_product_reviews(callback: types.CallbackQuery):
+    product_id = int(callback.data.split('_')[1])
+    session = Session()
+    
+    reviews = session.query(Review).filter_by(product_id=product_id).order_by(Review.created_at.desc()).limit(5).all()
+    product = session.query(Product).get(product_id)
+    
+    if not reviews:
+        await callback.answer("Пока нет отзывов на этот товар")
+        return
+    
+    reviews_text = f"📋 Отзывы на {product.name}:\n\n"
+    
+    for review in reviews:
+        user = session.query(User).get(review.user_id)
+        username = "Анонимно" if review.is_anonymous else (user.username or "Клиент")
+        stars = "⭐" * review.rating
+        
+        reviews_text += f"{stars} {username}\n"
+        reviews_text += f"💬 {review.comment}\n"
+        reviews_text += f"📅 {review.created_at.strftime('%d.%m.%Y')}\n\n"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад к товару", callback_data=f"product_{product_id}"))
+    
+    await callback.message.edit_text(reviews_text, reply_markup=keyboard.as_markup())
+    session.close()
+
+@dp.callback_query(lambda c: c.data == 'start_checkout')
+async def start_checkout(callback: types.CallbackQuery):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=callback.from_user.id).first()
+    if not user:
+        await callback.answer("Ваша корзина пуста")
+        session.close()
+        return
+    
+    orders = session.query(Order).filter_by(user_id=user.id, status='pending').all()
+    if not orders:
+        await callback.answer("Ваша корзина пуста")
+        session.close()
+        return
+    
+    await callback.message.edit_text(
+        "📦 Оформление заказа\n\n"
+        "Выберите способ получения заказа:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚚 Доставка", callback_data="delivery_method_delivery")],
+            [InlineKeyboardButton(text="🏪 Самовывоз", callback_data="delivery_method_pickup")]
+        ])
+    )
+    session.close()
+
+@dp.callback_query(lambda c: c.data.startswith('delivery_method_'))
+async def select_delivery_method(callback: types.CallbackQuery):
+    method = callback.data.split('_')[2]
+    
+    method_names = {
+        'delivery': 'Обычная доставка',
+        'pickup': 'Самовывоз',
+        'express': 'Экспресс-доставка'
+    }
+    
+    if method in ['delivery', 'express']:
+        await callback.message.edit_text(
+            f"📍 {method_names[method]}\n\n"
+            "Пожалуйста, укажите адрес доставки:\n"
+            "(или отправьте геолокацию)",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="start_checkout")]
+            ])
+        )
+        # Сохраняем выбранный метод доставки
+        user_navigation_history[callback.from_user.id] = {'delivery_method': method}
+    else:
+        # Для самовывоза показываем адреса
+        await callback.message.edit_text(
+            f"🏪 {method_names[method]}\n\n"
+            "Выберите адрес для самовывоза:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📍 Независимости 43", callback_data="pickup_address_1")],
+                [InlineKeyboardButton(text="📍 Независимости 60", callback_data="pickup_address_2")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="start_checkout")]
+            ])
+        )
+        user_navigation_history[callback.from_user.id] = {'delivery_method': method}
+
+@dp.callback_query(lambda c: c.data.startswith('pickup_address_'))
+async def select_pickup_address(callback: types.CallbackQuery):
+    address_id = callback.data.split('_')[2]
+    addresses = {
+        '1': 'Независимости 43',
+        '2': 'Независимости 60'
+    }
+    
+    address = addresses.get(address_id)
+    user_data = user_navigation_history.get(callback.from_user.id, {})
+    user_data['address'] = address
+    user_navigation_history[callback.from_user.id] = user_data
+    
+    await show_time_selection(callback)
+
+async def show_time_selection(callback_or_message):
+    now = datetime.now()
+    keyboard = InlineKeyboardBuilder()
+    for day_offset in range(3):
+        date = now + timedelta(days=day_offset)
+        day_name = ["Сегодня", "Завтра", "Послезавтра"][day_offset]
+        for hour in range(10, 21, 2):
+            if day_offset == 0 and hour <= now.hour + 1:
+                continue
+            time_slot = f"{hour:02d}:00-{hour+2:02d}:00"
+            keyboard.add(InlineKeyboardButton(
+                text=f"{day_name} {time_slot}",
+                callback_data=f"time_{date.strftime('%Y%m%d')}_{hour}"
+            ))
+    # Если это callback — edit_text, если message — answer
+    if isinstance(callback_or_message, types.CallbackQuery):
+        await callback_or_message.message.edit_text(
+            "⏰ Выберите время:",
+            reply_markup=keyboard.adjust(2).as_markup()
+        )
+    else:
+        await callback_or_message.answer(
+            "⏰ Выберите время:",
+            reply_markup=keyboard.adjust(2).as_markup()
+        )
+
+@dp.callback_query(lambda c: c.data.startswith('time_'))
+async def select_time(callback: types.CallbackQuery):
+    _, date_str, hour_str = callback.data.split('_')
+    date_obj = datetime.strptime(date_str, '%Y%m%d')
+    hour = int(hour_str)
+    
+    user_data = user_navigation_history.get(callback.from_user.id, {})
+    user_data['delivery_date'] = date_obj.strftime('%d.%m.%Y')
+    user_data['delivery_time'] = f"{hour:02d}:00-{hour+2:02d}:00"
+    user_data['stage'] = 'choose_payment'
+    user_navigation_history[callback.from_user.id] = user_data
+    
+    await callback.message.edit_text(
+        "Выберите способ оплаты:",
+        reply_markup=get_payment_keyboard()
+    )
+
+@dp.callback_query(lambda c: c.data.startswith('pay_'))
+async def select_payment(callback: types.CallbackQuery):
+    payment_methods = {
+        "pay_cash": "Наличными",
+        "pay_card": "Картой при получении",
+        "pay_bank": "Безналичный расчет"
+    }
+    method = payment_methods.get(callback.data, "Не выбран")
+    user_data = user_navigation_history.get(callback.from_user.id, {})
+    user_data['payment_method'] = method
+    user_navigation_history[callback.from_user.id] = user_data
+
+    await show_order_summary(callback)
+
+async def show_order_summary(callback: types.CallbackQuery):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=callback.from_user.id).first()
+    orders = session.query(Order).filter_by(user_id=user.id, status='pending').all()
+    user_data = user_navigation_history.get(callback.from_user.id, {})
+    
+    # Рассчитываем сумму заказа
+    total = 0
+    order_text = "📋 Ваш заказ:\n\n"
+    
+    for order in orders:
+        product = session.query(Product).get(order.product_id)
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        item_total = price * order.quantity
+        total += item_total
+        
+        order_text += f"• {product.name} × {order.quantity} = {item_total:.0f}\n"
+    
+    # Добавляем стоимость доставки
+    delivery_cost = 0
+    if user_data.get('delivery_method') == 'express':
+        delivery_cost = 200
+    elif user_data.get('delivery_method') == 'delivery' and total < 1500:
+        delivery_cost = 200
+    elif user_data.get('delivery_method') == 'pickup':
+        total *= 0.95  # Скидка 5% за самовывоз
+    
+    if delivery_cost > 0:
+        order_text += f"\n🚚 Доставка: {delivery_cost} byn"
+        total += delivery_cost
+    
+    order_text += f"\n\n💰 Итого: {total:.0f} byn"
+    order_text += f"\n📅 Дата: {user_data.get('delivery_date', '')}"
+    order_text += f"\n⏰ Время: {user_data.get('delivery_time', '')}"
+    order_text += f"\n💳 Оплата: {user_data.get('payment_method', 'Не выбрано')}"
+    
+    if user_data.get('address'):
+        order_text += f"\n📍 Адрес: {user_data['address']}"
+    
+    # Показываем возможность использования бонусов
+    if user.bonus_points >= 100:
+        possible_discount = min(user.bonus_points // 2, total * 0.3)
+        order_text += f"\n\n🎁 Доступна скидка бонусами: до {possible_discount:.0f} byn"
+    
+    keyboard = InlineKeyboardBuilder()
+    keyboard.add(InlineKeyboardButton(text="✅ Подтвердить заказ", callback_data="confirm_order"))
+    
+    if user.bonus_points >= 100:
+        keyboard.add(InlineKeyboardButton(text="🎁 Использовать бонусы", callback_data="use_bonuses"))
+    
+    keyboard.add(InlineKeyboardButton(text="✏️ Изменить", callback_data="start_checkout"))
+    
+    await callback.message.edit_text(order_text, reply_markup=keyboard.adjust(1).as_markup())
+    session.close()
+
+@dp.callback_query(lambda c: c.data == 'confirm_order')
+async def confirm_order(callback: types.CallbackQuery):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=callback.from_user.id).first()
+    orders = session.query(Order).filter_by(user_id=user.id, status='pending').all()
+    user_data = user_navigation_history.get(callback.from_user.id, {})
+    
+    # Рассчитываем финальную сумму
+    total = 0
+    for order in orders:
+        product = session.query(Product).get(order.product_id)
+        price = product.price * (1 - product.discount) if product.discount > 0 else product.price
+        total += price * order.quantity
+    
+    # Добавляем доставку
+    delivery_cost = 0
+    if user_data.get('delivery_method') == 'express':
+        delivery_cost = 8
+    elif user_data.get('delivery_method') == 'delivery' and total < 1500:
+        delivery_cost = 8
+    elif user_data.get('delivery_method') == 'pickup':
+        total *= 0.95
+    
+    total += delivery_cost
+    
+    # Обновляем заказы
+    for order in orders:
+        order.status = 'confirmed'
+        order.delivery_method = user_data.get('delivery_method', 'delivery')
+        order.address = user_data.get('address', '')
+        order.delivery_date = user_data.get('delivery_date', '')
+        order.delivery_time = user_data.get('delivery_time', '')
+        order.total_price = total / len(orders)  # Распределяем сумму
+    
+    # Начисляем бонусы (1byn = 1 балл)
+    user.bonus_points += int(total)
+    user.last_order_date = datetime.now()
+    
+    session.commit()
+    
+    # Создаем уведомление для запроса отзыва
+    for order in orders:
+        notification = Notification(
+            user_id=user.id,
+            message=f"Как вам понравился {session.query(Product).get(order.product_id).name}? Оставьте отзыв!",
+            scheduled_time=datetime.now() + timedelta(hours=2),
+            notification_type='review_request'
+        )
+        session.add(notification)
+    
+    session.commit()
+    
+    order_number = orders[0].id if orders else random.randint(1000, 9999)
+    
+    await callback.message.edit_text(
+        f"✅ Заказ #{order_number} успешно оформлен!\n\n"
+        f"💰 Сумма: {total:.0f} byn\n"
+        f"📅 {user_data.get('delivery_date', '')}\n"
+        f"⏰ {user_data.get('delivery_time', '')}\n"
+        f"🎁 Начислено бонусов: {int(total)}\n\n"
+        f"Мы свяжемся с вами для подтверждения.\n"
+        f"Спасибо за заказ! 🙏"
+    )
+    
+    # Очищаем историю навигации
+    if callback.from_user.id in user_navigation_history:
+        del user_navigation_history[callback.from_user.id]
+    
+    session.close()
+
+@dp.callback_query(lambda c: c.data == 'clear_cart')
+async def clear_cart(callback: types.CallbackQuery):
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=callback.from_user.id).first()
+    
+    if user:
+        session.query(Order).filter_by(user_id=user.id, status='pending').delete()
+        session.commit()
+    
+    await callback.message.edit_text("🗑 Корзина очищена")
+    session.close()
+
+@dp.callback_query(lambda c: c.data.startswith('rate_'))
+async def rate_order(callback: types.CallbackQuery):
+    _, order_id, rating = callback.data.split('_')
+    order_id = int(order_id)
+    rating = int(rating)
+    
+    session = Session()
+    user = session.query(User).filter_by(telegram_id=callback.from_user.id).first()
+    order = session.query(Order).get(order_id)
+    
+    if not order or order.user_id != user.id:
+        await callback.answer("Заказ не найден")
+        session.close()
+        return
+    
+    # Создаем отзыв
+    review = Review(
+        user_id=user.id,
+        product_id=order.product_id,
+        order_id=order.id,
+        rating=rating,
+        comment="Быстрая оценка через бота"
+    )
+    session.add(review)
+    
+    # Обновляем рейтинг продукта
+    product = session.query(Product).get(order.product_id)
+    all_reviews = session.query(Review).filter_by(product_id=order.product_id).all()
+    avg_rating = sum([r.rating for r in all_reviews]) / len(all_reviews) if all_reviews else 0
+    product.rating = round(avg_rating, 1)
+    
+    # Начисляем бонусы за отзыв
+    user.bonus_points += 25
+    
+    session.commit()
+    
+    stars = "⭐" * rating
+    await callback.message.edit_text(
+        f"Спасибо за оценку! {stars}\n"
+        f"🎁 Начислено 25 бонусных баллов\n\n"
+        f"Хотите оставить развернутый отзыв? "
+        f"Просто напишите его в чат!"
+    )
+    session.close()
+
+@dp.callback_query(lambda c: c.data == 'back_to_categories')
+async def back_to_categories(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🍰 Наше меню:\n\n"
+        "Выберите категорию пирогов:",
+        reply_markup=get_category_keyboard()
+    )
+
+@dp.callback_query(lambda c: c.data == "go_to_cart")
+async def go_to_cart(callback: types.CallbackQuery):
+    # Просто вызываем функцию показа корзины
+    await show_cart(callback.message)
+    await callback.answer()
+
+# Обработчик текстовых сообщений (адрес доставки, отзывы и т.д.)
+@dp.message()
+async def handle_text(message: types.Message):
+    user_data = user_navigation_history.get(message.from_user.id, {})
+    # Проверяем, что пользователь на этапе ввода адреса для доставки
+    if user_data.get('delivery_method') == 'delivery':
+        user_data['address'] = message.text
+        user_navigation_history[message.from_user.id] = user_data
+
+        # Подтверждаем адрес
+        await message.answer(
+            f"Адрес доставки сохранён:\n<b>{message.text}</b>",
+            parse_mode="HTML"
+        )
+        # Показываем инлайн-кнопки с выбором времени
+        await show_time_selection(message)
+        return
+    
+    # Если это похоже на развернутый отзыв
+    if len(message.text) > 10 and any(word in message.text.lower() for word in ['хорошо', 'плохо', 'вкусно', 'спасибо', 'рекомендую']):
+        session = Session()
+        user = session.query(User).filter_by(telegram_id=message.from_user.id).first()
+        
+        if user:
+            # Находим последний заказ без подробного отзыва
+            last_order = session.query(Order).filter_by(
+                user_id=user.id, 
+                status='completed'
+            ).order_by(Order.created_at.desc()).first()   
+            if last_order:
+                # Обновляем или создаем отзыв
+                review = session.query(Review).filter_by(order_id=last_order.id).first()
+                if review:
+                    review.comment = message.text
+                else:
+                    review = Review(
+                        user_id=user.id,
+                        product_id=last_order.product_id,
+                        order_id=last_order.id,
+                        rating=5,  # По умолчанию 5 звезд для развернутого отзыва
+                        comment=message.text
+                    )
+                    session.add(review)
+                
+                # Начисляем дополнительные бонусы
+                user.bonus_points += 50
+                session.commit()
+                
+        await message.answer(
+            "Спасибо за подробный отзыв! 🙏\n"
+            "🎁 Начислено 50 бонусных баллов\n\n"
+            "Ваше мнение очень важно для нас!",
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
+        session.close()
+        return
+    
+    # Стандартный ответ на неопознанные сообщения
+    await message.answer(
+        "Извините, я не понял вашего сообщения 🤔\n"
+        "Воспользуйтесь меню для навигации по боту:",
+        reply_markup=get_main_keyboard(message.from_user.id)
+    )
+
+# Функция для инициализации базы данных с тестовыми данными (вызывайте вручную при необходимости)
+def init_database():
+    session = Session()
+    if session.query(Product).count() == 0:
+        products = [
+            Product(
+                name="Пирог с яблоками",
+                description="Классический домашний пирог с сочными яблоками и корицей",
+                price=450,
+                category="sweet",
+                rating=4.8,
+                ingredients="Мука, яблоки, сахар, масло, яйца, корица",
+                calories=285,
+                preparation_time=45,
+                discount=0.1
+            ),
+            Product(
+                name="Мясной пирог",
+                description="Сытный пирог с говядиной, луком и специями",
+                price=650,
+                category="savory",
+                rating=4.6,
+                ingredients="Мука, говядина, лук, специи, яйца",
+                calories=420,
+                preparation_time=60
+            ),
+            Product(
+                name="Пирог с творогом",
+                description="Нежный творожный пирог с изюмом",
+                price=380,
+                category="sweet",
+                rating=4.7,
+                ingredients="Творог, мука, сахар, изюм, ванилин",
+                calories=245,
+                preparation_time=40
+            ),
+            Product(
+                name="Рыбный пирог",
+                description="Пирог с семгой и рисом",
+                price=720,
+                category="savory",
+                rating=4.5,
+                ingredients="Семга, рис, лук, укроп, тесто",
+                calories=380,
+                preparation_time=55
+            ),
+            Product(
+                name="Ягодный пирог",
+                description="Летний пирог с клубникой и черникой",
+                price=520,
+                category="sweet",
+                rating=4.9,
+                ingredients="Клубника, черника, мука, сахар, сливочное масло",
+                calories=295,
+                preparation_time=50,
+                discount=0.15
+            )
+        ]
+        for product in products:
+            session.add(product)
+        session.commit()
+        print("База данных инициализирована тестовыми данными")
+        session.close()
+
+# Основная функция для запуска бота
+async def main():
+    print("Бот запущен!")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -34,7 +34,7 @@ docker build -t bakery-bot .
 
 2. Запустите контейнер:
 ```bash
-docker run -d --name bakery-bot -e BOT_TOKEN=your_bot_token_here bakery-bot
+docker run -d --name bakery-bot -e BOT_TOKEN=7257681287:AAEmSAgs0CGRHimgeqd3K22tn6ltd6c8B0Q bakery-bot
 ```
 
 ## Функциональность

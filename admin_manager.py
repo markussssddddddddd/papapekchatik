@@ -57,8 +57,8 @@ def main():
 
     # Команда добавления администратора
     add_parser = subparsers.add_parser('add', help='Добавить нового администратора')
-    add_parser.add_argument('user_id', type=int, help='ID пользователя в Telegram')
-    add_parser.add_argument('username', type=str, help='Имя пользователя в Telegram')
+    add_parser.add_argument('user_id', type=int, help='5093023299')
+    add_parser.add_argument('username', type=str, help='dashkakrupinova')
 
     # Команда удаления администратора
     remove_parser = subparsers.add_parser('remove', help='Удалить администратора')
