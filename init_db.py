@@ -1,4 +1,8 @@
 from main import engine, Base, Product, Session, Admin
+from sqlalchemy import create_engine
+
+engine = create_engine('sqlite:///db.sqlite3')
+Base.metadata.create_all(engine)
 
 def init_db():
     Base.metadata.create_all(engine)
@@ -153,4 +157,4 @@ def add_admin(user_id: int, username: str):
 if __name__ == "__main__":
     init_db()
     # Здесь вы можете добавить администраторов, когда получите их ID
-    # Пример: add_admin(123456789, "admin_username") 
+    # Пример: add_admin(123456789, "admin_username")

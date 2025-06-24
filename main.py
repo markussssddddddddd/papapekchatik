@@ -945,5 +945,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}")
-if __name__ == "__main__":
-    asyncio.run(main())
+import os

@@ -28,7 +28,38 @@ Session = sessionmaker(bind=engine)
 # Словарь для хранения истории навигации пользователей
 user_navigation_history = {}
 
-# Модели данных
+# Модели данных 
+class Config:
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    FERNET_KEY = os.getenv("FERNET_KEY")
+    RETAIL_CRM_URL = os.getenv("RETAIL_CRM_URL")
+    RETAIL_CRM_API_KEY = os.getenv("RETAIL_CRM_API_KEY")
+    FREE_DELIVERY_THRESHOLD = 80  # Бесплатная доставка от этой суммы
+    DELIVERY_COST = 8  # Стоимость доставки
+
+    @classmethod
+    def validate(cls):
+        """Проверяет обязательные настройки конфигурации"""
+        errors = []
+        
+        if not cls.BOT_TOKEN:
+            errors.append("Токен Telegram бота (BOT_TOKEN) не указан")
+        
+        if not cls.RETAIL_CRM_URL:
+            errors.append("URL RetailCRM (RETAIL_CRM_URL) не указан")
+        elif not cls.RETAIL_CRM_URL.startswith(('http://', 'https://')):
+            errors.append("URL RetailCRM должен начинаться с http:// или https://")
+        
+        if not cls.RETAIL_CRM_API_KEY:
+            errors.append("API ключ RetailCRM (RETAIL_CRM_API_KEY) не указан")
+        
+        if errors:
+            error_message = "Ошибки конфигурации:\n- " + "\n- ".join(errors)
+            logger.error(error_message)
+            raise ValueError(error_message)
+        
+        logger.info("Конфигурация успешно проверена")
+        
 class Product(Base):
     __tablename__ = 'products'
     id = Column(Integer, primary_key=True)
